@@ -32,7 +32,7 @@ const vcp = new VCP({
     payload: {
       connectorId: 1,
       errorCode: "NoError",
-      status: "Available",
+      status: "Preparing",
     },
   });
 })();
