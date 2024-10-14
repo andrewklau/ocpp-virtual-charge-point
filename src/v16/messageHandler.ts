@@ -113,7 +113,7 @@ const callHandlers: { [key: string]: CallHandler } = {
       callFactory("StatusNotification", {
         connectorId: transaction.connectorId,
         errorCode: "NoError",
-        status: "Available",
+        status: "Preparing",
       })
     );
   },
