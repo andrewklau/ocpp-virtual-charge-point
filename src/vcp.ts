@@ -43,6 +43,56 @@ export class VCP {
     this.messageHandler = resolveMessageHandler(vcpOptions.ocppVersion);
     if (vcpOptions.adminPort) {
       const adminApi = new Hono();
+      adminApi.get("/", (c) => {
+        return c.html(`
+<html>
+<body>
+    <h1>VCP Admin Panel</h1>
+    <p>Charge Point: ${vcpOptions.chargePointId}</p>
+    
+    <button class="available" onclick="setStatus('Available')">Set Available</button>
+    <button class="preparing" onclick="setStatus('Preparing')">Set Preparing</button>
+    
+    <div id="result"></div>
+    
+    <script>
+        async function setStatus(status) {
+            const resultDiv = document.getElementById('result');
+            resultDiv.textContent = 'Sending...';
+            
+            try {
+                const response = await fetch('/execute', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        action: 'StatusNotification',
+                        payload: {
+                            connectorId: 1,
+                            errorCode: 'NoError',
+                            status: status,
+                            timestamp: new Date().toISOString()
+                        }
+                    })
+                });
+                
+                if (response.ok) {
+                    resultDiv.textContent = 'Status set to ' + status + ' successfully!';
+                    resultDiv.style.color = 'green';
+                } else {
+                    resultDiv.textContent = 'Error: ' + response.status;
+                    resultDiv.style.color = 'red';
+                }
+            } catch (error) {
+                resultDiv.textContent = 'Error: ' + error.message;
+                resultDiv.style.color = 'red';
+            }
+        }
+    </script>
+</body>
+</html>
+        `);
+      });
+
       adminApi.post(
         "/execute",
         zValidator(
