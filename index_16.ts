@@ -17,17 +17,25 @@ const vcp = new VCP({
   await vcp.connect();
   vcp.send(
     bootNotificationOcppMessage.request({
-      chargePointVendor: "Solidstudio",
+      chargePointVendor: "Simulator",
       chargePointModel: "VirtualChargePoint",
       chargePointSerialNumber: "S001",
       firmwareVersion: "1.0.0",
     }),
   );
+
   vcp.send(
     statusNotificationOcppMessage.request({
       connectorId: 1,
       errorCode: "NoError",
-      status: "Available",
+      status: "Preparing",
+    }),
+  );
+  vcp.send(
+    statusNotificationOcppMessage.request({
+      connectorId: 2,
+      errorCode: "NoError",
+      status: "Preparing",
     }),
   );
 })();

@@ -8,4 +8,4 @@ USER node
 WORKDIR /app
 ENV NODE_ENV production
 
-CMD ["npx", "tsx", "index_16.ts"]
+CMD ["npx", "tsx", "index_16_2_connectors.ts"]
