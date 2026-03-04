@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { generateOCMF, getOCMFPublicKey } from "../../ocmfGenerator";
 import {
   type OcppCall,
   type OcppCallResult,
@@ -7,6 +8,8 @@ import {
 import type { VCP } from "../../vcp";
 import { ConnectorIdSchema, IdTagInfoSchema, IdTokenSchema } from "./_common";
 import { meterValuesOcppMessage } from "./meterValues";
+import { statusNotificationOcppMessage } from "./statusNotification";
+import { stopTransactionOcppMessage } from "./stopTransaction";
 
 const StartTransactionReqSchema = z.object({
   connectorId: ConnectorIdSchema,
@@ -50,9 +53,70 @@ class StartTransactionOcppMessage extends OcppOutgoing<
                     measurand: "Energy.Active.Import.Register",
                     unit: "kWh",
                   },
+                  {
+                    value: transactionState.socPercent.toFixed(1),
+                    measurand: "SoC",
+                    unit: "Percent",
+                  },
                 ],
               },
             ],
+          }),
+        );
+      },
+      autoStopCallback: async () => {
+        const transactionId = result.payload.transactionId;
+        const transaction =
+          vcp.transactionManager.transactions.get(transactionId);
+        if (!transaction) return;
+
+        const ocmf = generateOCMF({
+          startTime: transaction.startedAt,
+          startEnergy: 0,
+          endTime: new Date(),
+          endEnergy:
+            vcp.transactionManager.getMeterValue(transactionId) / 1000,
+          idTag: transaction.idTag,
+        });
+
+        vcp.send(
+          stopTransactionOcppMessage.request({
+            transactionId: transactionId,
+            meterStop: Math.floor(
+              vcp.transactionManager.getMeterValue(transactionId),
+            ),
+            timestamp: new Date().toISOString(),
+            transactionData: [
+              {
+                timestamp: new Date().toISOString(),
+                sampledValue: [
+                  {
+                    value: JSON.stringify({
+                      signedMeterData: Buffer.from(ocmf).toString("base64"),
+                      encodingMethod: "OCMF",
+                      publicKey: getOCMFPublicKey().toString("base64"),
+                    }),
+                    format: "SignedData",
+                    context: "Transaction.End",
+                  },
+                ],
+              },
+            ],
+          }),
+        );
+        vcp.send(
+          statusNotificationOcppMessage.request({
+            connectorId: call.payload.connectorId,
+            errorCode: "NoError",
+            status: "Available",
+          }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        vcp.send(
+          statusNotificationOcppMessage.request({
+            connectorId: call.payload.connectorId,
+            errorCode: "NoError",
+            status: "Preparing",
           }),
         );
       },

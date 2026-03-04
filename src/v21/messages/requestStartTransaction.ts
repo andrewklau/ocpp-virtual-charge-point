@@ -1,5 +1,6 @@
 import * as uuid from "uuid";
 import { z } from "zod";
+import { generateOCMF, getOCMFPublicKey } from "../../ocmfGenerator";
 import { type OcppCall, OcppIncoming } from "../../ocppMessage";
 import type { VCP } from "../../vcp";
 import {
@@ -67,11 +68,75 @@ class RequestStartTransactionOcppIncoming extends OcppIncoming<
                       unit: "kWh",
                     },
                   },
+                  {
+                    value: transactionStatus.socPercent,
+                    measurand: "SoC",
+                    unitOfMeasure: {
+                      unit: "Percent",
+                    },
+                  },
                 ],
               },
             ],
           }),
         );
+      },
+      autoStopCallback: async () => {
+        const transaction =
+          vcp.transactionManager.transactions.get(transactionId);
+        if (!transaction) return;
+
+        const ocmf = generateOCMF({
+          startTime: transaction.startedAt,
+          startEnergy: 0,
+          endTime: new Date(),
+          endEnergy:
+            vcp.transactionManager.getMeterValue(transactionId) / 1000,
+          idTag: transaction.idTag,
+        });
+
+        vcp.send(
+          transactionEventOcppOutgoing.request({
+            eventType: "Ended",
+            timestamp: new Date().toISOString(),
+            seqNo: 0,
+            triggerReason: "StopAuthorized",
+            transactionInfo: {
+              transactionId: transactionId,
+              stoppedReason: "SOCLimitReached",
+            },
+            evse: {
+              id: transactionEvseId,
+              connectorId: transactionConnectorId,
+            },
+            meterValue: [
+              {
+                timestamp: new Date().toISOString(),
+                sampledValue: [
+                  {
+                    value: vcp.transactionManager.getMeterValue(transactionId),
+                    signedMeterValue: {
+                      signedMeterData: Buffer.from(ocmf).toString("base64"),
+                      signingMethod: "",
+                      encodingMethod: "OCMF",
+                      publicKey: getOCMFPublicKey().toString("base64"),
+                    },
+                    context: "Transaction.End",
+                  },
+                ],
+              },
+            ],
+          }),
+        );
+        vcp.send(
+          statusNotificationOcppOutgoing.request({
+            evseId: transactionEvseId,
+            connectorId: transactionConnectorId,
+            connectorStatus: "Available",
+            timestamp: new Date().toISOString(),
+          }),
+        );
+        vcp.transactionManager.stopTransaction(transactionId);
       },
     });
     vcp.respond(
