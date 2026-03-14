@@ -40,16 +40,22 @@ class StartTransactionOcppMessage extends OcppOutgoing<
       idTag: call.payload.idTag,
       connectorId: call.payload.connectorId,
       meterValuesCallback: async (transactionState) => {
+        const txId = result.payload.transactionId;
+        const powerKw = vcp.transactionManager.getInstantPowerKw(txId);
+        const voltage = vcp.transactionManager.getVoltage(txId);
+        const current = vcp.transactionManager.getCurrent(txId);
+        const temperature = vcp.transactionManager.getTemperature(txId);
+
         vcp.send(
           meterValuesOcppMessage.request({
             connectorId: call.payload.connectorId,
-            transactionId: result.payload.transactionId,
+            transactionId: txId,
             meterValue: [
               {
                 timestamp: new Date().toISOString(),
                 sampledValue: [
                   {
-                    value: (transactionState.meterValue / 1000).toString(),
+                    value: (transactionState.meterValue / 1000).toFixed(3),
                     measurand: "Energy.Active.Import.Register",
                     unit: "kWh",
                   },
@@ -57,6 +63,26 @@ class StartTransactionOcppMessage extends OcppOutgoing<
                     value: transactionState.socPercent.toFixed(1),
                     measurand: "SoC",
                     unit: "Percent",
+                  },
+                  {
+                    value: (powerKw * 1000).toFixed(0),
+                    measurand: "Power.Active.Import",
+                    unit: "W",
+                  },
+                  {
+                    value: voltage.toFixed(1),
+                    measurand: "Voltage",
+                    unit: "V",
+                  },
+                  {
+                    value: current.toFixed(1),
+                    measurand: "Current.Import",
+                    unit: "A",
+                  },
+                  {
+                    value: temperature.toFixed(1),
+                    measurand: "Temperature",
+                    unit: "Celsius",
                   },
                 ],
               },

@@ -23,12 +23,14 @@ import {
 import { TransactionManager } from "./transactionManager";
 import { heartbeatOcppMessage } from "./v16/messages/heartbeat";
 
-interface VCPOptions {
+export interface VCPOptions {
   ocppVersion: OcppVersion;
   endpoint: string;
   chargePointId: string;
   basicAuthPassword?: string;
   adminPort?: number;
+  /** If false, don't exit process on WS close (for multi-charger mode) */
+  exitOnClose?: boolean;
 }
 
 export class VCP {
@@ -38,6 +40,13 @@ export class VCP {
   private isFinishing = false;
 
   transactionManager = new TransactionManager();
+
+  /** Track connector statuses for admin visibility */
+  connectorStatuses: Map<number, string> = new Map();
+
+  get options(): VCPOptions {
+    return this.vcpOptions;
+  }
 
   constructor(private vcpOptions: VCPOptions) {
     this.messageHandler = resolveMessageHandler(vcpOptions.ocppVersion);
@@ -119,7 +128,7 @@ export class VCP {
   async connect(): Promise<void> {
     logger.info(`Connecting... | ${util.inspect(this.vcpOptions)}`);
     this.isFinishing = false;
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const websocketUrl = `${this.vcpOptions.endpoint}/${this.vcpOptions.chargePointId}`;
       const protocol = toProtocolVersion(this.vcpOptions.ocppVersion);
       this.ws = new WebSocket(websocketUrl, [protocol], {
@@ -135,6 +144,12 @@ export class VCP {
       });
 
       this.ws.on("open", () => resolve());
+      this.ws.on("error", (err: Error) => {
+        logger.error(
+          `WebSocket error for ${this.vcpOptions.chargePointId}: ${err.message}`,
+        );
+        reject(err);
+      });
       this.ws.on("message", (message: string) => this._onMessage(message));
       this.ws.on("ping", () => {
         logger.info("Received PING");
@@ -148,10 +163,18 @@ export class VCP {
     });
   }
 
+  /** Check if the WebSocket is connected and ready */
+  get isConnected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
   // biome-ignore lint/suspicious/noExplicitAny: ocpp types
   send(ocppCall: OcppCall<any>) {
-    if (!this.ws) {
-      throw new Error("Websocket not initialized. Call connect() first");
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      logger.warn(
+        `Cannot send ${ocppCall.action} for ${this.vcpOptions.chargePointId}: WebSocket not connected. Queuing will be skipped.`,
+      );
+      return;
     }
     ocppOutbox.enqueue(ocppCall);
     const jsonMessage = JSON.stringify([
@@ -204,6 +227,55 @@ export class VCP {
     setInterval(() => {
       this.send(heartbeatOcppMessage.request({}));
     }, interval);
+  }
+
+  /**
+   * Gracefully stop all active transactions and close the WebSocket.
+   * Used during SIGTERM / shutdown to leave the CSMS in a clean state.
+   */
+  async gracefulShutdown(): Promise<void> {
+    logger.info(
+      `Graceful shutdown for ${this.vcpOptions.chargePointId}: stopping ${this.transactionManager.transactions.size} active transaction(s)...`,
+    );
+    this.isFinishing = true;
+
+    // Stop every active transaction so the CSMS isn't left dangling
+    for (const [txId, tx] of this.transactionManager.transactions) {
+      try {
+        const meterStop = Math.floor(
+          this.transactionManager.getMeterValue(txId),
+        );
+        this.send(
+          call("StopTransaction", {
+            transactionId: txId,
+            meterStop,
+            timestamp: new Date().toISOString(),
+            reason: "Reboot",
+          }),
+        );
+        this.send(
+          call("StatusNotification", {
+            connectorId: tx.connectorId,
+            errorCode: "NoError",
+            status: "Unavailable",
+            timestamp: new Date().toISOString(),
+          }),
+        );
+      } catch (err) {
+        logger.error(`Failed to stop transaction ${txId}: ${err}`);
+      }
+    }
+
+    // Give the WebSocket a moment to flush outgoing messages
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    if (this.ws) {
+      this.ws.close();
+      this.ws = undefined;
+    }
+    logger.info(
+      `Shutdown complete for ${this.vcpOptions.chargePointId}`,
+    );
   }
 
   close() {
@@ -261,7 +333,81 @@ export class VCP {
     if (this.isFinishing) {
       return;
     }
-    logger.info(`Connection closed. code=${code}, reason=${reason}`);
-    process.exit();
+    logger.info(
+      `Connection closed for ${this.vcpOptions.chargePointId}. code=${code}, reason=${reason}`,
+    );
+
+    if (this.vcpOptions.exitOnClose !== false) {
+      process.exit();
+    }
+
+    // Auto-reconnect: preserve transaction state, just re-establish the WS
+    logger.info(
+      `Reconnecting ${this.vcpOptions.chargePointId} in 5s (${this.transactionManager.transactions.size} active transaction(s) preserved)...`,
+    );
+    setTimeout(() => this._reconnect(), 5000);
+  }
+
+  private async _reconnect(): Promise<void> {
+    const maxRetries = 10;
+    const baseDelay = 5000;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        logger.info(
+          `Reconnect attempt ${attempt}/${maxRetries} for ${this.vcpOptions.chargePointId}...`,
+        );
+        await this.connect();
+        logger.info(
+          `Reconnected ${this.vcpOptions.chargePointId} successfully.`,
+        );
+
+        // Re-send BootNotification
+        this.send(
+          call("BootNotification", {
+            chargePointVendor: "Simulator",
+            chargePointModel: "VirtualChargePoint",
+            chargePointSerialNumber: this.vcpOptions.chargePointId,
+            firmwareVersion: "1.0.0",
+          }),
+        );
+
+        // Re-announce connector statuses
+        for (const [connId, status] of this.connectorStatuses) {
+          this.send(
+            call("StatusNotification", {
+              connectorId: connId,
+              errorCode: "NoError",
+              status,
+              timestamp: new Date().toISOString(),
+            }),
+          );
+        }
+
+        // Re-announce active transactions as Charging
+        for (const [, tx] of this.transactionManager.transactions) {
+          this.send(
+            call("StatusNotification", {
+              connectorId: tx.connectorId,
+              errorCode: "NoError",
+              status: "Charging",
+              timestamp: new Date().toISOString(),
+            }),
+          );
+        }
+
+        return;
+      } catch (err) {
+        const delay = baseDelay * Math.min(attempt, 6);
+        logger.error(
+          `Reconnect attempt ${attempt} failed for ${this.vcpOptions.chargePointId}: ${err}. Retrying in ${delay / 1000}s...`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+
+    logger.error(
+      `Failed to reconnect ${this.vcpOptions.chargePointId} after ${maxRetries} attempts.`,
+    );
   }
 }

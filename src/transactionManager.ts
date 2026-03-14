@@ -162,4 +162,70 @@ export class TransactionManager {
       (energyWh / (transaction.batteryCapacityKwh * 1000)) * 100;
     return Math.min(100, transaction.socStart + socIncrease);
   }
+
+  /**
+   * Get instantaneous charging power in kW with realistic fluctuation.
+   * Power tapers as SoC approaches 100% and has random deviation.
+   */
+  getInstantPowerKw(transactionId: TransactionId): number {
+    const transaction = this.transactions.get(transactionId);
+    if (!transaction) return 0;
+
+    const soc = this.getSoC(transactionId);
+    let basePower = transaction.chargingPowerKw;
+
+    // Taper power above 80% SoC (realistic DC fast charging curve)
+    if (soc > 80) {
+      const taperFactor = 1 - ((soc - 80) / 20) * 0.7;
+      basePower *= Math.max(0.3, taperFactor);
+    }
+
+    // Add +/- 5% random deviation
+    const deviation = 1 + (Math.random() - 0.5) * 0.1;
+    return basePower * deviation;
+  }
+
+  /**
+   * Get simulated voltage (V) with small random fluctuation.
+   * DC fast chargers typically operate at 400-500V.
+   */
+  getVoltage(transactionId: TransactionId): number {
+    const transaction = this.transactions.get(transactionId);
+    if (!transaction) return 0;
+
+    const soc = this.getSoC(transactionId);
+    // Voltage rises slightly with SoC (400V at 0% to 460V at 100%)
+    const baseVoltage = 400 + (soc / 100) * 60;
+    const deviation = (Math.random() - 0.5) * 4; // +/- 2V
+    return baseVoltage + deviation;
+  }
+
+  /**
+   * Get simulated current (A) derived from power and voltage.
+   */
+  getCurrent(transactionId: TransactionId): number {
+    const powerKw = this.getInstantPowerKw(transactionId);
+    const voltage = this.getVoltage(transactionId);
+    if (voltage === 0) return 0;
+    return (powerKw * 1000) / voltage;
+  }
+
+  /**
+   * Get simulated connector temperature (Celsius).
+   * Rises with charging duration and power, with random fluctuation.
+   */
+  getTemperature(transactionId: TransactionId): number {
+    const transaction = this.transactions.get(transactionId);
+    if (!transaction) return 25;
+
+    const elapsedMin =
+      (new Date().getTime() - transaction.startedAt.getTime()) / 60000;
+    const powerRatio =
+      this.getInstantPowerKw(transactionId) / CHARGER_MAX_POWER_KW;
+
+    // Ambient 25C, rises up to ~45C based on power and duration (caps around 20min)
+    const heatRise = powerRatio * 20 * Math.min(1, elapsedMin / 20);
+    const deviation = (Math.random() - 0.5) * 2; // +/- 1C
+    return 25 + heatRise + deviation;
+  }
 }

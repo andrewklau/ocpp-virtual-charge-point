@@ -8,4 +8,6 @@ USER node
 WORKDIR /app
 ENV NODE_ENV production
 
-CMD ["npx", "tsx", "index_16_2_connectors.ts"]
+EXPOSE 8080
+
+CMD ["npx", "tsx", "index_multi.ts"]
