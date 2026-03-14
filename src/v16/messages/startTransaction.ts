@@ -134,17 +134,27 @@ class StartTransactionOcppMessage extends OcppOutgoing<
           statusNotificationOcppMessage.request({
             connectorId: call.payload.connectorId,
             errorCode: "NoError",
-            status: "Available",
+            status: "Finishing",
           }),
         );
-        await new Promise((resolve) => setTimeout(resolve, 3000));
-        vcp.send(
-          statusNotificationOcppMessage.request({
-            connectorId: call.payload.connectorId,
-            errorCode: "NoError",
-            status: "Preparing",
-          }),
-        );
+        if (vcp.options.autoReturnPreparing !== false) {
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+          vcp.send(
+            statusNotificationOcppMessage.request({
+              connectorId: call.payload.connectorId,
+              errorCode: "NoError",
+              status: "Available",
+            }),
+          );
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+          vcp.send(
+            statusNotificationOcppMessage.request({
+              connectorId: call.payload.connectorId,
+              errorCode: "NoError",
+              status: "Preparing",
+            }),
+          );
+        }
       },
     });
   };

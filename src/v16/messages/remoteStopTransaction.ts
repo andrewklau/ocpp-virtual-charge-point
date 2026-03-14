@@ -68,19 +68,31 @@ class RemoteStopTransactionOcppMessage extends OcppIncoming<
       statusNotificationOcppMessage.request({
         connectorId: transaction.connectorId,
         errorCode: "NoError",
-        status: "Available",
+        status: "Finishing",
       }),
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    if (vcp.options.autoReturnPreparing !== false) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
 
-    vcp.send(
-      statusNotificationOcppMessage.request({
-        connectorId: transaction.connectorId,
-        errorCode: "NoError",
-        status: "Preparing",
-      }),
-    );
+      vcp.send(
+        statusNotificationOcppMessage.request({
+          connectorId: transaction.connectorId,
+          errorCode: "NoError",
+          status: "Available",
+        }),
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+
+      vcp.send(
+        statusNotificationOcppMessage.request({
+          connectorId: transaction.connectorId,
+          errorCode: "NoError",
+          status: "Preparing",
+        }),
+      );
+    }
   };
 }
 

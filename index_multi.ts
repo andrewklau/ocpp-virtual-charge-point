@@ -28,6 +28,7 @@ interface ChargerConfig {
   password?: string;
   label: string;
   connectors: number[];
+  autoReturnPreparing: boolean;
 }
 
 function loadChargerConfigs(): ChargerConfig[] {
@@ -44,6 +45,9 @@ function loadChargerConfigs(): ChargerConfig[] {
         .split(",")
         .map((s) => Number.parseInt(s.trim(), 10));
 
+      const autoReturnEnv = process.env[`CHARGER_${i}_AUTO_RETURN_PREPARING`] ?? process.env.AUTO_RETURN_PREPARING;
+      const autoReturnPreparing = autoReturnEnv !== undefined ? autoReturnEnv !== 'false' : true;
+
       configs.push({
         wsUrl,
         cpId,
@@ -51,6 +55,7 @@ function loadChargerConfigs(): ChargerConfig[] {
         label:
           process.env[`CHARGER_${i}_LABEL`] ?? `Charger ${i}`,
         connectors,
+        autoReturnPreparing,
       });
     }
   }
@@ -59,12 +64,14 @@ function loadChargerConfigs(): ChargerConfig[] {
   if (configs.length === 0) {
     const wsUrl = process.env.WS_URL ?? "ws://localhost:3000";
     const cpId = process.env.CP_ID ?? "123456";
+    const autoReturnEnv = process.env.AUTO_RETURN_PREPARING;
     configs.push({
       wsUrl,
       cpId,
       password: process.env.PASSWORD,
       label: "Charger 1",
       connectors: [1, 2],
+      autoReturnPreparing: autoReturnEnv !== undefined ? autoReturnEnv !== 'false' : true,
     });
   }
 
@@ -87,6 +94,7 @@ function loadChargerConfigs(): ChargerConfig[] {
       ocppVersion: OcppVersion.OCPP_1_6,
       basicAuthPassword: cfg.password,
       exitOnClose: false,
+      autoReturnPreparing: cfg.autoReturnPreparing,
     });
 
     try {
@@ -105,14 +113,15 @@ function loadChargerConfigs(): ChargerConfig[] {
         }),
       );
 
-      // Initialize all connectors as Preparing
+      // Initialize all connectors
+      const initStatus = cfg.autoReturnPreparing ? "Preparing" : "Available";
       for (const connId of cfg.connectors) {
-        vcp.connectorStatuses.set(connId, "Preparing");
+        vcp.connectorStatuses.set(connId, initStatus);
         vcp.send(
           statusNotificationOcppMessage.request({
             connectorId: connId,
             errorCode: "NoError",
-            status: "Preparing",
+            status: initStatus,
           }),
         );
       }
@@ -124,6 +133,7 @@ function loadChargerConfigs(): ChargerConfig[] {
         endpoint: cfg.wsUrl,
         chargePointId: cfg.cpId,
         connectors: cfg.connectors,
+        autoReturnPreparing: cfg.autoReturnPreparing,
       });
     } catch (err) {
       logger.error(

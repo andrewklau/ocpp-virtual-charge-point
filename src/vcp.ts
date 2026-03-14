@@ -31,6 +31,15 @@ export interface VCPOptions {
   adminPort?: number;
   /** If false, don't exit process on WS close (for multi-charger mode) */
   exitOnClose?: boolean;
+  /** If true, auto-return connectors to Preparing after transaction ends (default: true) */
+  autoReturnPreparing?: boolean;
+}
+
+export interface OcppLog {
+  timestamp: string;
+  direction: "sent" | "received" | "event";
+  action: string;
+  payload?: unknown;
 }
 
 export class VCP {
@@ -38,11 +47,27 @@ export class VCP {
   private messageHandler: OcppMessageHandler;
 
   private isFinishing = false;
+  private static readonly MAX_LOGS = 200;
 
   transactionManager = new TransactionManager();
 
   /** Track connector statuses for admin visibility */
   connectorStatuses: Map<number, string> = new Map();
+
+  /** Rolling log buffer for admin UI */
+  ocppLogs: OcppLog[] = [];
+
+  addLog(direction: OcppLog["direction"], action: string, payload?: unknown) {
+    this.ocppLogs.push({
+      timestamp: new Date().toISOString(),
+      direction,
+      action,
+      payload,
+    });
+    if (this.ocppLogs.length > VCP.MAX_LOGS) {
+      this.ocppLogs.splice(0, this.ocppLogs.length - VCP.MAX_LOGS);
+    }
+  }
 
   get options(): VCPOptions {
     return this.vcpOptions;
@@ -143,12 +168,25 @@ export class VCP {
         },
       });
 
-      this.ws.on("open", () => resolve());
+      let settled = false;
+      this.ws.on("open", () => {
+        settled = true;
+        this.addLog("event", "Connected", { endpoint: websocketUrl });
+        resolve();
+      });
       this.ws.on("error", (err: Error) => {
         logger.error(
           `WebSocket error for ${this.vcpOptions.chargePointId}: ${err.message}`,
         );
-        reject(err);
+        if (!settled) {
+          settled = true;
+          reject(err);
+        }
+        // After connection is established, errors will be followed by a close event.
+        // Force close if the socket is not already closing/closed to ensure _onClose fires.
+        if (this.ws && this.ws.readyState !== WebSocket.CLOSING && this.ws.readyState !== WebSocket.CLOSED) {
+          this.ws.close();
+        }
       });
       this.ws.on("message", (message: string) => this._onMessage(message));
       this.ws.on("ping", () => {
@@ -177,6 +215,7 @@ export class VCP {
       return;
     }
     ocppOutbox.enqueue(ocppCall);
+    this.addLog("sent", ocppCall.action, ocppCall.payload);
     const jsonMessage = JSON.stringify([
       2,
       ocppCall.messageId,
@@ -197,6 +236,7 @@ export class VCP {
     if (!this.ws) {
       throw new Error("Websocket not initialized. Call connect() first");
     }
+    this.addLog("sent", `${result.action}:Response`, result.payload);
     const jsonMessage = JSON.stringify([3, result.messageId, result.payload]);
     logger.info(`Responding with ➡️  ${jsonMessage}`);
     validateOcppIncomingResponse(
@@ -296,6 +336,7 @@ export class VCP {
     const [type, ...rest] = data;
     if (type === 2) {
       const [messageId, action, payload] = rest;
+      this.addLog("received", action, payload);
       validateOcppIncomingRequest(this.vcpOptions.ocppVersion, action, payload);
       this.messageHandler.handleCall(this, { messageId, action, payload });
     } else if (type === 3) {
@@ -306,6 +347,7 @@ export class VCP {
           `Received CallResult for unknown messageId=${messageId}`,
         );
       }
+      this.addLog("received", `${enqueuedCall.action}:Result`, payload);
       validateOcppOutgoingResponse(
         this.vcpOptions.ocppVersion,
         enqueuedCall.action,
@@ -318,6 +360,7 @@ export class VCP {
       });
     } else if (type === 4) {
       const [messageId, errorCode, errorDescription, errorDetails] = rest;
+      this.addLog("received", "CallError", { errorCode, errorDescription, errorDetails });
       this.messageHandler.handleCallError(this, {
         messageId,
         errorCode,
@@ -333,6 +376,7 @@ export class VCP {
     if (this.isFinishing) {
       return;
     }
+    this.addLog("event", "Disconnected", { code, reason: reason || undefined });
     logger.info(
       `Connection closed for ${this.vcpOptions.chargePointId}. code=${code}, reason=${reason}`,
     );
@@ -349,13 +393,15 @@ export class VCP {
   }
 
   private async _reconnect(): Promise<void> {
-    const maxRetries = 10;
     const baseDelay = 5000;
+    const maxDelay = 60000;
+    let attempt = 0;
 
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    while (!this.isFinishing) {
+      attempt++;
       try {
         logger.info(
-          `Reconnect attempt ${attempt}/${maxRetries} for ${this.vcpOptions.chargePointId}...`,
+          `Reconnect attempt ${attempt} for ${this.vcpOptions.chargePointId}...`,
         );
         await this.connect();
         logger.info(
@@ -398,16 +444,12 @@ export class VCP {
 
         return;
       } catch (err) {
-        const delay = baseDelay * Math.min(attempt, 6);
+        const delay = Math.min(baseDelay * Math.min(attempt, 6), maxDelay);
         logger.error(
           `Reconnect attempt ${attempt} failed for ${this.vcpOptions.chargePointId}: ${err}. Retrying in ${delay / 1000}s...`,
         );
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
-
-    logger.error(
-      `Failed to reconnect ${this.vcpOptions.chargePointId} after ${maxRetries} attempts.`,
-    );
   }
 }
